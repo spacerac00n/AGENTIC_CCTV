@@ -1,0 +1,8 @@
+openai
+langgraph
+langchain-openai
+opencv-python
+streamlit
+python-dotenv
+pillow
+# threading is part of the Python standard library
