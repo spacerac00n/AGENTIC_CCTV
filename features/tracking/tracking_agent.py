@@ -1,36 +1,16 @@
 from __future__ import annotations
 
-import json
-import re
 from datetime import datetime, timezone
 
 import streamlit as st
 from openai import OpenAI
 
 from config import OPENAI_API_KEY_2, TRACKING_PROMPT_TEMPLATE, TRACKING_VLM_MODEL
+from features.dashboard.police_chat import notify_tracker_match
 from features.tracking.tracking_state import TrackingState
+from features.vision_fallback import request_vision_json
 
-
-def _extract_payload(raw_text: str) -> dict[str, object]:
-    """Parse JSON from raw model text, including fenced JSON blocks."""
-    text = raw_text.strip()
-    if not text:
-        return {}
-    for candidate in (text, text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()):
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            return payload
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return {}
-    try:
-        payload = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+CLIENT = OpenAI(api_key=OPENAI_API_KEY_2) if OPENAI_API_KEY_2 else None
 
 
 def _as_visible(value: object) -> bool:
@@ -42,37 +22,36 @@ def _as_visible(value: object) -> bool:
 
 def _observe(frame_b64: str, prompt: str) -> dict[str, object]:
     """Return one Agent 2 VLM observation or a safe fallback."""
-    if not OPENAI_API_KEY_2 or not frame_b64:
+    if not frame_b64:
         return {
             "subject_visible": False,
             "last_position": "",
             "confidence": "low",
             "notes": "",
         }
-    try:
-        response = OpenAI(api_key=OPENAI_API_KEY_2).responses.create(
-            model=TRACKING_VLM_MODEL,
-            input=[
-                {"role": "system", "content": prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": "Analyze this frame."},
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:image/jpeg;base64,{frame_b64}",
-                        },
-                    ],
-                },
-            ],
-        )
-        payload = _extract_payload(str(getattr(response, "output_text", "")))
-    except Exception:
+    payload, source, failure_reason = request_vision_json(
+        client=CLIENT,
+        model=TRACKING_VLM_MODEL,
+        system_prompt=prompt,
+        user_prompt="Analyze this frame.",
+        frame_b64=frame_b64,
+    )
+    if not payload:
         return {
             "subject_visible": False,
             "last_position": "",
             "confidence": "low",
-            "notes": "",
+            "notes": {
+                "primary_unavailable": "Tracking vision model unavailable.",
+                "primary_request_failed": "Tracking vision request failed.",
+                "primary_invalid_response": "Tracking vision returned invalid output.",
+            }.get(failure_reason, ""),
+        }
+    if source == "ollama":
+        payload = {
+            **payload,
+            "notes": str(payload.get("notes", "")).strip()
+            or "Tracking observation generated with Ollama fallback.",
         }
     return payload if isinstance(payload, dict) else {"subject_visible": False}
 
@@ -122,6 +101,7 @@ def check_tracking_match(
         "camera_id": camera_id,
         "last_seen_camera": camera_id,
         "frame_index": frame_index,
+        "frame_b64": frame_b64,
         "source_offset_seconds": source_offset_seconds,
         "timestamp": seen_at,
         "last_seen_timestamp": seen_at,
@@ -132,3 +112,9 @@ def check_tracking_match(
     tracking["sightings"] = list(tracking.get("sightings", [])) + [sighting]
     tracking["last_sighting"] = sighting
     st.session_state["tracking"] = tracking
+    notify_tracker_match(
+        camera_id,
+        frame_index,
+        sighting.get("confidence", "low"),
+        str(tracking.get("threat_type", "unknown")),
+    )

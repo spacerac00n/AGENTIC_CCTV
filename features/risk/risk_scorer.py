@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 from openai import OpenAI
 
 from config import (
@@ -14,6 +12,7 @@ from config import (
     VISION_MODEL,
 )
 from features.agents.graph import IncidentState
+from features.vision_fallback import request_vision_json
 
 CLIENT = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 MIN_RISK_SCORE = 0.0
@@ -65,34 +64,32 @@ def _risk_prompt(state: IncidentState) -> str:
 
 def _request_risk_score(state: IncidentState) -> tuple[dict[str, object], str, str]:
     """Call the model for a risk score and return payload, status, and api error."""
-    if CLIENT is None:
-        return {}, "fallback", "Risk model unavailable; fallback response used."
-    try:
-        response = CLIENT.responses.create(
-            model=VISION_MODEL,
-            input=[
-                {"role": "system", "content": RISK_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": _risk_prompt(state)},
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:image/jpeg;base64,{state['frame_b64']}",
-                        },
-                    ],
-                },
-            ],
+    payload, source, failure_reason = request_vision_json(
+        client=CLIENT,
+        model=VISION_MODEL,
+        system_prompt=RISK_SYSTEM_PROMPT,
+        user_prompt=_risk_prompt(state),
+        frame_b64=state["frame_b64"],
+    )
+    if not payload:
+        return (
+            {},
+            "fallback",
+            {
+                "primary_unavailable": "Risk model unavailable; fallback response used.",
+                "primary_request_failed": "Risk API request failed; fallback response used.",
+                "primary_invalid_response": "Risk API returned invalid output; fallback response used.",
+            }.get(failure_reason, ""),
         )
-    except Exception as exc:
-        print(f"API error occurred: {exc}")
-        return {}, "fallback", "Risk API request failed; fallback response used."
-    try:
-        payload = json.loads(getattr(response, "output_text", ""))
-    except json.JSONDecodeError:
-        return {}, "fallback", ""
-    if not isinstance(payload, dict):
-        return {}, "fallback", ""
+    if source == "ollama":
+        return (
+            payload,
+            "fallback",
+            {
+                "primary_unavailable": "Risk model unavailable; Ollama fallback used.",
+                "primary_request_failed": "Risk API request failed; Ollama fallback used.",
+            }.get(failure_reason, ""),
+        )
     return payload, "completed", ""
 
 

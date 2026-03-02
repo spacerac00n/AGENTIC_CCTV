@@ -8,6 +8,7 @@ class TrackingState(TypedDict):
     source_camera_id: str
     search_camera_id: str
     subject_description: str
+    threat_type: str
     user_extra_context: str
     priority: str
     photo_b64: str

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
-
 from openai import OpenAI
 
 from config import OPENAI_API_KEY, VISION_MODEL, VISION_SYSTEM_PROMPT, VISION_USER_PROMPT
 from features.agents.graph import IncidentState
+from features.vision_fallback import request_vision_json
 
 CLIENT = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 VALID_THREAT_TYPES = {"weapon", "physical_altercation", "suspicious_behaviour", "none"}
@@ -89,61 +88,34 @@ def _vision_prompt(camera_profile: dict[str, object]) -> str:
 def detect_frame(frame_b64: str, camera_profile: dict[str, object]) -> dict[str, object]:
     """Analyze a base64 frame with the configured vision model."""
     fallback = _fallback()
-    if CLIENT is None:
+    payload, source, failure_reason = request_vision_json(
+        client=CLIENT,
+        model=VISION_MODEL,
+        system_prompt=VISION_SYSTEM_PROMPT,
+        user_prompt=_vision_prompt(camera_profile),
+        frame_b64=frame_b64,
+    )
+    if not payload:
         return {
             "payload": fallback,
             "used_fallback": True,
-            "api_error_message": "Vision model unavailable; fallback response used.",
-            "stage_status": "fallback",
-        }
-    try:
-        response = CLIENT.responses.create(
-            model=VISION_MODEL,
-            input=[
-                {"role": "system", "content": VISION_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": _vision_prompt(camera_profile)},
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:image/jpeg;base64,{frame_b64}",
-                        },
-                    ],
-                },
-            ],
-        )
-    except Exception as exc:
-        print(f"API error occurred: {exc}")
-        return {
-            "payload": fallback,
-            "used_fallback": True,
-            "api_error_message": "Vision API request failed; fallback response used.",
-            "stage_status": "fallback",
-        }
-    try:
-        payload = json.loads(getattr(response, "output_text", ""))
-    except json.JSONDecodeError:
-        payload = fallback
-        return {
-            "payload": payload,
-            "used_fallback": True,
-            "api_error_message": "",
-            "stage_status": "fallback",
-        }
-    if not isinstance(payload, dict):
-        return {
-            "payload": fallback,
-            "used_fallback": True,
-            "api_error_message": "",
+            "api_error_message": {
+                "primary_unavailable": "Vision model unavailable; fallback response used.",
+                "primary_request_failed": "Vision API request failed; fallback response used.",
+                "primary_invalid_response": "Vision API returned invalid output; fallback response used.",
+            }.get(failure_reason, ""),
             "stage_status": "fallback",
         }
     normalized_payload, crowd_fallback = _normalize_payload(payload)
+    used_model_fallback = source != "openai"
     return {
         "payload": normalized_payload,
-        "used_fallback": crowd_fallback,
-        "api_error_message": "",
-        "stage_status": "fallback" if crowd_fallback else "completed",
+        "used_fallback": crowd_fallback or used_model_fallback,
+        "api_error_message": {
+            "primary_unavailable": "Vision model unavailable; Ollama fallback used.",
+            "primary_request_failed": "Vision API request failed; Ollama fallback used.",
+        }.get(failure_reason, ""),
+        "stage_status": "fallback" if crowd_fallback or used_model_fallback else "completed",
     }
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 from datetime import datetime
 
 import streamlit as st
@@ -9,6 +10,8 @@ import streamlit as st
 _OPEN_KEY = "police_chat_open"
 _MESSAGES_KEY = "police_chat_messages"
 _RED_ALERT_SENT_KEY = "police_chat_red_alert_sent"
+_TRACKER_ALERT_TOKENS_KEY = "police_chat_tracker_alert_tokens"
+_DISPATCH_ALERT_TOKENS_KEY = "police_chat_dispatch_alert_tokens"
 
 
 def _ensure_state() -> None:
@@ -16,6 +19,8 @@ def _ensure_state() -> None:
     st.session_state.setdefault(_OPEN_KEY, False)
     st.session_state.setdefault(_MESSAGES_KEY, [])
     st.session_state.setdefault(_RED_ALERT_SENT_KEY, False)
+    st.session_state.setdefault(_TRACKER_ALERT_TOKENS_KEY, [])
+    st.session_state.setdefault(_DISPATCH_ALERT_TOKENS_KEY, [])
 
 
 def _toggle() -> None:
@@ -32,6 +37,38 @@ def _humanize_threat(threat_type: str) -> str:
 def _alert_timestamp() -> str:
     """Return the local display time for a new alert."""
     return datetime.now().astimezone().strftime("%I:%M %p").lstrip("0")
+
+
+def _camera_number(camera_id: str) -> str:
+    """Return a compact camera number for tracker alerts."""
+    matches = re.findall(r"\d+", camera_id)
+    if not matches:
+        return camera_id or "Unknown"
+    return matches[-1].lstrip("0") or "0"
+
+
+def _confidence_percent(confidence: object) -> str:
+    """Convert model confidence labels into the requested percentage display."""
+    text = str(confidence).strip().lower()
+    mapping = {
+        "low": "25%",
+        "medium": "50%",
+        "high": "75%",
+        "very high": "90%",
+        "very_high": "90%",
+        "certain": "90%",
+    }
+    if text in mapping:
+        return mapping[text]
+    if text.endswith("%"):
+        return text
+    try:
+        numeric = float(text)
+    except ValueError:
+        return "25%"
+    if numeric <= 1:
+        numeric *= 100
+    return f"{int(round(numeric))}%"
 
 
 def notify_red_threat(
@@ -60,6 +97,53 @@ def notify_red_threat(
     )
     st.session_state[_MESSAGES_KEY] = messages[-10:]
     st.session_state[_RED_ALERT_SENT_KEY] = True
+    st.session_state[_OPEN_KEY] = True
+
+
+def notify_tracker_match(
+    camera_id: str,
+    frame_index: int,
+    confidence: object,
+    threat_type: str,
+) -> None:
+    """Append one tracker notification for a newly confirmed sighting."""
+    _ensure_state()
+    token = f"{camera_id}:{frame_index}"
+    seen_tokens = set(str(value) for value in st.session_state.get(_TRACKER_ALERT_TOKENS_KEY, []))
+    if token in seen_tokens:
+        return
+    messages = list(st.session_state.get(_MESSAGES_KEY, []))
+    messages.append(
+        {
+            "role": "tracker",
+            "confidence": _confidence_percent(confidence),
+            "camera_number": _camera_number(camera_id),
+            "created_at": _alert_timestamp(),
+            "threat_type": _humanize_threat(threat_type),
+        }
+    )
+    st.session_state[_MESSAGES_KEY] = messages[-10:]
+    st.session_state[_TRACKER_ALERT_TOKENS_KEY] = list(seen_tokens | {token})
+    st.session_state[_OPEN_KEY] = True
+
+
+def notify_dispatch_sent(case_id: str) -> None:
+    """Append one notification when dispatch is confirmed for an incident."""
+    _ensure_state()
+    normalized_case_id = str(case_id).strip() or "dispatch"
+    seen_tokens = set(str(value) for value in st.session_state.get(_DISPATCH_ALERT_TOKENS_KEY, []))
+    if normalized_case_id in seen_tokens:
+        return
+    messages = list(st.session_state.get(_MESSAGES_KEY, []))
+    messages.append(
+        {
+            "role": "dispatch_sent",
+            "content": "Dispatch Sent 🚨",
+            "created_at": _alert_timestamp(),
+        }
+    )
+    st.session_state[_MESSAGES_KEY] = messages[-10:]
+    st.session_state[_DISPATCH_ALERT_TOKENS_KEY] = list(seen_tokens | {normalized_case_id})
     st.session_state[_OPEN_KEY] = True
 
 
@@ -92,7 +176,7 @@ def render_police_chat() -> None:
             st.rerun()
     with title_col:
         st.markdown(
-            "<div style='font-size:1.2rem;font-weight:800;line-height:1.2;'>Notification</div>",
+            "<div style='font-size:1.2rem;font-weight:800;line-height:1.2;'>NTU Security</div>",
             unsafe_allow_html=True,
         )
     if not st.session_state.get(_OPEN_KEY):
@@ -119,6 +203,40 @@ def render_police_chat() -> None:
                     f"<p style='margin:0;line-height:1.55;color:#ffffff;'>Priority: {priority}</p>"
                     f"<div style='margin-top:0.65rem;padding-top:0.5rem;"
                     "border-top:1px solid rgba(255,255,255,0.18);font-size:0.78rem;"
+                    "line-height:1.3;color:rgba(255,255,255,0.72);text-align:right;'>"
+                    f"{created_at}</div>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                continue
+            if role == "tracker":
+                confidence = html.escape(str(entry.get("confidence", "25%")))
+                camera_number = html.escape(str(entry.get("camera_number", "Unknown")))
+                created_at = html.escape(str(entry.get("created_at", "")))
+                threat_type = html.escape(str(entry.get("threat_type", "Unknown")))
+                st.sidebar.markdown(
+                    "<div style='padding:0.85rem 0.95rem;margin:0.4rem 0 0.7rem;"
+                    "border-radius:0.75rem;border:1px solid rgba(255,255,255,0.16);"
+                    "background:#000000;color:#ffffff;'>"
+                    "<p style='margin:0 0 0.35rem;line-height:1.5;font-weight:800;'>‼️ Tracker</p>"
+                    f"<p style='margin:0 0 0.2rem;line-height:1.55;color:#ffffff;'>Confidence: {confidence}</p>"
+                    f"<p style='margin:0 0 0.2rem;line-height:1.55;color:#ffffff;'>Camera: {camera_number}</p>"
+                    f"<p style='margin:0 0 0.2rem;line-height:1.55;color:#ffffff;'>Time: {created_at}</p>"
+                    f"<p style='margin:0;line-height:1.55;color:#ffffff;'>Threat type: {threat_type}</p>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                continue
+            if role == "dispatch_sent":
+                content = html.escape(str(entry.get("content", "Dispatch Sent 🚨")))
+                created_at = html.escape(str(entry.get("created_at", "")))
+                st.sidebar.markdown(
+                    "<div style='padding:0.85rem 0.95rem;margin:0.4rem 0 0.7rem;"
+                    "border-radius:0.75rem;border:1px solid rgba(239,68,68,0.45);"
+                    "background:#000000;color:#ffffff;'>"
+                    f"<p style='margin:0;line-height:1.5;font-weight:800;color:#ffffff;'>{content}</p>"
+                    f"<div style='margin-top:0.55rem;padding-top:0.45rem;"
+                    "border-top:1px solid rgba(255,255,255,0.12);font-size:0.78rem;"
                     "line-height:1.3;color:rgba(255,255,255,0.72);text-align:right;'>"
                     f"{created_at}</div>"
                     "</div>",

@@ -16,9 +16,13 @@ from features.agents.graph import IncidentState
 from features.agents.pipeline_runner import start_camera_pipeline
 from features.agents.record_formatter import build_ai_incident_record, format_incident_record
 from features.audit.audit_logger import get_audit_by_camera, log_incident
-from features.dashboard.police_chat import notify_red_threat, render_police_chat
+from features.dashboard.police_chat import (
+    notify_dispatch_sent,
+    notify_red_threat,
+    render_police_chat,
+)
 from features.dashboard.report_card import render_report_card
-from features.tracking.camera_map import render_camera_map
+from features.tracking.camera_map import render_camera_map, render_tracker_cameras
 from features.tracking.tracking_state import TrackingState
 
 
@@ -29,6 +33,7 @@ def _tracking_state() -> TrackingState:
         "source_camera_id": "",
         "search_camera_id": LIVE_CAMERAS[1]["camera_id"],
         "subject_description": "",
+        "threat_type": "Unknown",
         "user_extra_context": "",
         "priority": "yellow",
         "photo_b64": "",
@@ -85,6 +90,7 @@ def _confirm_camera_incident(camera_id: str, case_id: str) -> None:
         incidents[index] = updated
         cameras[camera_id] = {**cameras[camera_id], "incidents": incidents}
         st.session_state["cameras"] = cameras
+        notify_dispatch_sent(str(updated.get("case_id", case_id)))
         return
 
 
@@ -124,6 +130,7 @@ def _create_manual_track_card(
         "source_camera_id": current.get("source_camera_id") or LIVE_CAMERAS[0]["camera_id"],
         "search_camera_id": LIVE_CAMERAS[1]["camera_id"],
         "subject_description": description,
+        "threat_type": "Unknown",
         "priority": priority,
         "photo_b64": photo_b64,
         "photo_name": photo_name,
@@ -140,13 +147,16 @@ def _render_track_card() -> None:
     sightings = list(tracking.get("sightings", []))
     last_sighting = dict(tracking.get("last_sighting", {}))
     is_active = bool(tracking.get("active"))
+    is_default_state = not is_active and not sightings and not bool(tracking.get("show_builder"))
     status_label = "Active" if is_active else "Non Active"
     priority_color, priority_label = _priority_style(str(tracking.get("priority", "yellow")))
+    icon_color = "transparent" if is_default_state else priority_color
+    icon_shadow = "none" if is_default_state else f"0 0 12px {priority_color}"
     icon_col, title_col, action_col = st.columns((0.45, 8, 0.9))
     with icon_col:
         st.markdown(
             f"<div style='width:18px;height:18px;margin-top:0.35rem;border-radius:999px;"
-            f"background:{priority_color};box-shadow:0 0 12px {priority_color};'></div>",
+            f"background:{icon_color};box-shadow:{icon_shadow};'></div>",
             unsafe_allow_html=True,
         )
     with title_col:
@@ -445,8 +455,8 @@ def _render_global_view(
     released_frames: list[IncidentState],
 ) -> int | None:
     """Render the original main dashboard tabs."""
-    live_tab, history_tab, map_tab = st.tabs(
-        ["Live Incident", "Incident History", "Live Map"]
+    live_tab, history_tab, map_tab, tracker_tab = st.tabs(
+        ["Live Incident", "Incident History", "Map", "Tracker"]
     )
     with live_tab:
         selector_col, content_col = st.columns((1, 4))
@@ -506,17 +516,25 @@ def _render_global_view(
                 st.info(f"{selected_label} is a simulated monitoring node. No live feed is attached.")
                 st.caption("Use Camera 1 or Camera 2 to view active incident frames.")
     with history_tab:
+        st.dataframe(_history_summary_rows(released_frames), width="stretch")
         if not released_frames:
             st.info("No incidents recorded yet.")
         else:
+            with st.expander("Incident History Table", expanded=False):
+                st.dataframe(_history_rows(released_frames), width="stretch")
             for frame in reversed(released_frames):
-                label = str(frame.get("case_id", "")).strip() or "Incident"
+                label = f"Frame {int(frame.get('frame_index', 0))} — {frame.get('case_id', '')}"
                 with st.expander(label, expanded=False):
                     if render_report_card(frame, True, f"global_history_{int(frame.get('frame_index', 0))}"):
                         return int(frame.get("frame_index", 0))
     with map_tab:
+        render_camera_map(key_prefix="map_tab", heading="Map")
+    with tracker_tab:
         _render_track_card()
-        render_camera_map()
+        st.markdown("")
+        render_camera_map(key_prefix="tracker_tab", heading="Map", enable_glow=False)
+        st.markdown("")
+        render_tracker_cameras(enable_glow=False)
     return None
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -19,6 +20,7 @@ from features.agents.graph import IncidentState, default_state
 from features.agents.pipeline_runner import run_incident_pipeline
 from features.agents.record_formatter import format_incident_record
 from features.audit.audit_logger import log_incident, next_case_id
+from features.dashboard.police_chat import notify_dispatch_sent
 from features.dashboard.app import auto_refresh, init_session_state, render_dashboard
 from features.ingestion.frame_sampler import sample_frames
 
@@ -96,6 +98,16 @@ def _session_defaults() -> None:
     st.session_state.setdefault("stream_ended", False)
 
 
+def _frame_iterator() -> Iterator[dict[str, object]]:
+    """Return a valid frame iterator, recreating it if session state was corrupted."""
+    frames = st.session_state.get("frames")
+    if hasattr(frames, "__next__"):
+        return frames  # type: ignore[return-value]
+    frames = sample_frames()
+    st.session_state["frames"] = frames
+    return frames
+
+
 def _enqueue_due_packets() -> None:
     """Move source-time-ready packets into the queue."""
     elapsed = time.monotonic() - float(st.session_state["stream_started_at"])
@@ -103,9 +115,16 @@ def _enqueue_due_packets() -> None:
         packet = st.session_state.get("next_frame_packet")
         if packet is None:
             try:
-                packet = next(st.session_state["frames"])
+                packet = next(_frame_iterator())
             except StopIteration:
                 st.session_state["stream_ended"] = True
+                break
+            except Exception as exc:
+                st.session_state["stream_ended"] = True
+                st.session_state["next_frame_packet"] = None
+                st.session_state["stream_error"] = (
+                    f"Frame sampler failed: {exc.__class__.__name__}"
+                )
                 break
             st.session_state["next_frame_packet"] = packet
         if float(packet.get("source_offset_seconds", 0.0)) > elapsed:
@@ -189,6 +208,7 @@ def _confirm_dispatch(frame_index: int) -> None:
         released[position] = updated
         if frame_index == int(st.session_state.get("latest_live_frame_index", 0)):
             st.session_state["incident_state"] = updated
+        notify_dispatch_sent(str(updated.get("case_id", state.get("case_id", ""))))
         return
 
 

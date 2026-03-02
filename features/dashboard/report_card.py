@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from datetime import datetime, timezone
 
 import streamlit as st
@@ -104,6 +105,7 @@ def _start_tracking(state: IncidentState) -> None:
         "source_camera_id": _source_camera_id(state),
         "search_camera_id": LIVE_CAMERAS[1]["camera_id"],
         "subject_description": str(state.get("frame_description", "")),
+        "threat_type": _humanize(str(state.get("threat_type", "unknown"))).title(),
         "user_extra_context": str(st.session_state["tracking"].get("user_extra_context", "")),
         "priority": _priority_from_state(state),
         "photo_b64": "",
@@ -162,7 +164,6 @@ def render_report_card(
     details = dict(record.get("key_details", {}))
     color = str(status.get("threat_color", "green"))
     color = color if color in COLOR_CRITERIA else "green"
-    label = str(status.get("threat_label", COLOR_CRITERIA[color]["label"]))
     summary = str(state.get("incident_summary", "")).strip() or str(
         record.get("executive_summary", "")
     ).strip()
@@ -172,41 +173,90 @@ def render_report_card(
         observed = f"Observed threat: {threat} ({confidence} confidence)."
     else:
         observed = "Observed threat: No immediate threat detected."
-    try:
-        container = st.container(border=True)
-    except TypeError:
-        container = st.container()
+    badge_styles = {
+        "green": {"label": "Low Risk", "color": "#22c55e"},
+        "yellow": {"label": "Medium", "color": "#eab308"},
+        "orange": {"label": "High", "color": "#f97316"},
+        "red": {"label": "Critical", "color": "#ef4444"},
+    }
+    badge_style = badge_styles.get(color, badge_styles["green"])
+    tracking = dict(st.session_state.get("tracking", {}))
+    track_status = "Active" if bool(tracking.get("active")) else "Ready"
+    source_name = "Camera 1" if _source_camera_id(state) == LIVE_CAMERAS[0]["camera_id"] else _source_camera_id(state)
+    frame_meta = (
+        f"Frame #{int(state.get('frame_index', 0))} | "
+        f"Source Time: {float(state.get('source_offset_seconds', 0.0)):.1f}s"
+    )
+    container = st.container()
     with container:
-        st.subheader("Report Card")
-        _render_tracking_controls(state, key_suffix)
-        st.caption(
-            " | ".join(
-                [
-                    f"Frame #{int(state.get('frame_index', 0))}",
-                    f"Source Time: {float(state.get('source_offset_seconds', 0.0)):.1f}s",
-                ]
-            )
+        st.markdown(
+            "<div style='font-size:1.15rem;font-weight:700;line-height:1.2;margin-bottom:0.75rem;'>"
+            "Report Card"
+            "</div>",
+            unsafe_allow_html=True,
         )
         confirmed = False
-        score_col, badge_col = st.columns(2)
-        score_col.metric("Risk Score", f"{float(details.get('risk_score', 0.0)):.1f}")
-        with badge_col:
-            if show_confirm and str(status.get("dispatch_status", "")) == "awaiting_confirmation":
-                confirmed = st.button(
-                    "Confirm Dispatch",
-                    type="primary",
-                    key=f"confirm_dispatch_{int(state.get('frame_index', 0))}_{key_suffix}",
-                )
-            st.caption("Threat Level")
+        top_left, top_right = st.columns((1.1, 1), gap="medium")
+        with top_left:
             st.markdown(
-                f"<div style='padding:0.75rem;background:{COLOR_CRITERIA[color]['hex']};"
-                f"color:white;font-weight:700;border-radius:0.5rem;text-align:center;'>"
-                f"{label} ({color.title()})</div>",
+                "<div style='background:#0f172a;border:1px solid rgba(255,255,255,0.08);"
+                "border-radius:16px;padding:1rem 1rem 0.95rem;'>"
+                "<div style='color:rgba(255,255,255,0.72);font-size:0.88rem;font-weight:700;"
+                "line-height:1.2;margin-bottom:0.35rem;'>Risk Score</div>"
+                f"<div style='color:#ffffff;font-size:3.1rem;font-weight:800;line-height:1.02;'>"
+                f"{float(details.get('risk_score', 0.0)):.1f}</div>"
+                f"<div style='margin-top:0.85rem;'><span style='display:inline-block;"
+                f"padding:0.48rem 0.9rem;border-radius:999px;background:{badge_style['color']};"
+                "color:#ffffff;font-size:0.92rem;font-weight:700;line-height:1;'>"
+                f"{badge_style['label']}</span></div>"
+                "</div>",
                 unsafe_allow_html=True,
             )
-        st.markdown("**What Is Happening**")
-        st.write(summary or "No incident summary available.")
-        st.caption(observed)
+        with top_right:
+            st.markdown(
+                "<div style='background:#0f172a;border:1px solid rgba(255,255,255,0.08);"
+                "border-radius:16px;padding:1rem;color:#ffffff;font-size:0.98rem;"
+                "font-weight:600;line-height:1.45;'>"
+                f"Track: {html.escape(track_status)}"
+                "</div>"
+                "<div style='background:#0f172a;border:1px solid rgba(255,255,255,0.08);"
+                "border-top:0;border-radius:0 0 16px 16px;padding:0 1rem 1rem;color:rgba(255,255,255,0.64);"
+                "font-size:0.84rem;line-height:1.4;"
+                "margin-top:0.15rem;'>"
+                f"{html.escape(source_name)} | {html.escape(frame_meta)}"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown("<div style='height:0.7rem;'></div>", unsafe_allow_html=True)
+            action_col, track_col = st.columns((1.05, 1), gap="small")
+            with action_col:
+                if show_confirm and str(status.get("dispatch_status", "")) == "awaiting_confirmation":
+                    confirmed = st.button(
+                        "Confirm Dispatch",
+                        type="primary",
+                        key=f"confirm_dispatch_{int(state.get('frame_index', 0))}_{key_suffix}",
+                        use_container_width=True,
+                    )
+                else:
+                    st.markdown(
+                        "<div style='height:2.5rem;'></div>",
+                        unsafe_allow_html=True,
+                    )
+            with track_col:
+                _render_tracking_controls(state, key_suffix)
+        st.markdown(
+            "<div style='background:#0f172a;border:1px solid rgba(255,255,255,0.08);"
+            "border-radius:16px;padding:1rem 1rem 0.9rem;margin-top:0.85rem;'>"
+            "<div style='color:#ffffff;font-size:1rem;font-weight:700;line-height:1.25;"
+            "margin-bottom:0.55rem;'>What Is Happening</div>"
+            f"<div style='color:rgba(255,255,255,0.9);font-size:0.95rem;line-height:1.6;'>"
+            f"{html.escape(summary or 'No incident summary available.')}</div>"
+            "<div style='border-top:1px solid rgba(255,255,255,0.08);margin-top:0.8rem;"
+            "padding-top:0.55rem;color:rgba(255,255,255,0.62);font-size:0.82rem;line-height:1.35;'>"
+            f"{html.escape(observed)}</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
         with st.expander("Why This Color", expanded=False):
             st.write(build_color_reason(record))
         with st.expander("Other Data", expanded=False):
