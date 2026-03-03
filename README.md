@@ -38,7 +38,7 @@ Environment variables (see `.env.example`):
 - `OLLAMA_VISION_MODEL` — vision-capable Ollama model name
 
 ## Running the app
-1. Start Streamlit:
+1. Start Streamlit: Please wait awhile for the demo live feed to load (demo1.mov)
 ```bash
 streamlit run main.py
 ```
